@@ -16,17 +16,14 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from dotenv import load_dotenv
-from transformers import pipeline
+# We no longer need the local transformers pipeline
+# from transformers import pipeline
 
 # --- 1. SETUP ---
 load_dotenv()
 app = FastAPI(title="Sahayak AI Assistant")
 PROFANITY_LIST = {"badword1", "exampleprofanity", "badword2"}
-
-# In-memory storage for OTPs. For a real app, use a database.
 otp_storage = {}
-
-# Add middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
@@ -54,20 +51,14 @@ print("Loading embeddings model and vector store...")
 embeddings = HuggingFaceEmbeddings(
     model_name='sentence-transformers/all-MiniLM-L6-v2',
     model_kwargs={'device': 'cpu'},
-    cache_folder='/data/models-cache' # Explicitly set cache folder for deployment
+    cache_folder='./.cache'
 )
 db = FAISS.load_local('vector_store/', embeddings, allow_dangerous_deserialization=True)
 retriever = db.as_retriever(search_kwargs={'k': 2})
 print("Embeddings and vector store loaded.")
 
 print("Setting up remote Chat LLM...")
-# Create the base endpoint connection
-llm_endpoint = HuggingFaceEndpoint(
-    repo_id="mistralai/Mistral-7B-Instruct-v0.2",
-    temperature=0.1,
-    max_new_tokens=512
-)
-# Wrap the endpoint in the ChatHuggingFace class to handle formatting
+llm_endpoint = HuggingFaceEndpoint(repo_id="mistralai/Mistral-7B-Instruct-v0.2", temperature=0.1, max_new_tokens=512)
 llm_chat = ChatHuggingFace(llm=llm_endpoint)
 print("Chat LLM loaded.")
 
@@ -79,9 +70,12 @@ summarizer = HuggingFacePipeline.from_model_id(
 )
 print("Summarization pipeline ready.")
 
+# --- OPTIMIZED: Use HuggingFaceEndpoint for NER to save memory ---
 print("Setting up NER pipeline for keyword extraction...")
-ner_pipeline = pipeline("ner", model="dslim/bert-base-NER")
-keyword_extractor = HuggingFacePipeline(pipeline=ner_pipeline)
+keyword_extractor = HuggingFaceEndpoint(
+    repo_id="dslim/bert-base-NER",
+    task="token-classification",
+)
 print("Keyword extraction pipeline ready.")
 
 
@@ -98,20 +92,13 @@ rag_chain = (
 class Query(BaseModel):
     text: str
 
-# Helper function to send email
 def send_otp_email(receiver_email: str, otp: str):
     sender_email = os.getenv("SENDER_EMAIL")
     password = os.getenv("SENDER_PASSWORD")
     if not sender_email or not password:
         print("ERROR: SENDER_EMAIL or SENDER_PASSWORD environment variables not set.")
         return False
-
-    message = f"""
-    Subject: Your OTP for Sahayak Assistant
-
-    Your One-Time Password is: {otp}
-    This OTP is valid for 5 minutes.
-    """
+    message = f"Subject: Your OTP for Sahayak Assistant\n\nYour One-Time Password is: {otp}"
     context = ssl.create_default_context()
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
@@ -123,7 +110,6 @@ def send_otp_email(receiver_email: str, otp: str):
         print(f"Failed to send email: {e}")
         return False
 
-# Pydantic models for 2FA
 class OtpRequest(BaseModel):
     email: EmailStr
 
@@ -135,39 +121,29 @@ class OtpVerify(BaseModel):
 def read_root():
     return {"message": "Sahayak AI Assistant API is running!"}
 
-# Endpoint to request an OTP
 @app.post("/request-otp")
 def request_otp(data: OtpRequest):
     otp = ''.join(random.choices(string.digits, k=6))
     expiry = datetime.now() + timedelta(minutes=5)
     otp_storage[data.email] = {"otp": otp, "expiry": expiry}
-
     if send_otp_email(data.email, otp):
-        return {"message": "OTP sent successfully to your email."}
+        return {"message": "OTP sent successfully."}
     else:
         return JSONResponse(status_code=500, content={"message": "Failed to send OTP email."})
 
-# Endpoint to verify an OTP
 @app.post("/verify-otp")
 def verify_otp(data: OtpVerify):
     stored_data = otp_storage.get(data.email)
-    if not stored_data:
-        return JSONResponse(status_code=400, content={"message": "OTP not requested for this email or has expired."})
+    if not stored_data or datetime.now() > stored_data["expiry"] or stored_data["otp"] != data.otp:
+        if stored_data and datetime.now() > stored_data["expiry"]:
+             del otp_storage[data.email]
+        return JSONResponse(status_code=400, content={"message": "Invalid or expired OTP."})
 
-    if datetime.now() > stored_data["expiry"]:
-        del otp_storage[data.email]
-        return JSONResponse(status_code=400, content={"message": "OTP has expired."})
-
-    if stored_data["otp"] == data.otp:
-        del otp_storage[data.email]
-        return {"message": "OTP verified successfully. Access granted."}
-    else:
-        return JSONResponse(status_code=400, content={"message": "Invalid OTP."})
+    del otp_storage[data.email]
+    return {"message": "OTP verified successfully. Access granted."}
 
 @app.post("/chat")
 def chat(query: Query):
-    # In a real app, you would protect this endpoint,
-    # only allowing access after successful OTP verification.
     print(f"Received query: {query.text}")
     response = rag_chain.invoke(query.text)
     print(f"Generated response: {response}")
@@ -175,14 +151,16 @@ def chat(query: Query):
 
 @app.post("/analyze")
 async def analyze_document(file: UploadFile = File(...)):
-    # This endpoint should also be protected in a real app.
     print(f"Received file: {file.filename}")
     try:
         contents = await file.read()
         text = contents.decode("utf-8")
-        summary = summarizer.invoke(text)
+        summary_list = summarizer.invoke(text)
+        summary = summary_list[0]['summary_text'] if summary_list else "Could not generate summary."
+        
         entities = keyword_extractor.invoke(text)
-        keywords = sorted(list(set([entity['word'] for entity in entities if entity['entity_group'] in ['ORG', "PER", 'LOC', 'MISC']])))
+        keywords = sorted(list(set([entity['word'] for entity in entities if entity.get('entity_group') in ['ORG', "PER", 'LOC', 'MISC']])))
+        
         return {"filename": file.filename, "summary": summary, "keywords": keywords}
     except Exception as e:
         return {"error": f"Failed to process file: {str(e)}"}
