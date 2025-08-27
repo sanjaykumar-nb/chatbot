@@ -1,0 +1,16 @@
+fastapi
+langchain
+langchain-community
+langchain-huggingface
+langchain-core
+sentence-transformers
+faiss-cpu
+pypdf2
+python-docx
+pydantic[email]
+python-multipart
+transformers
+torch
+python-multipart
+gunicorn
+uvicorn

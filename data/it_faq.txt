@@ -1,0 +1,10 @@
+# IT Support Frequently Asked Questions (FAQ)
+
+## Password Reset
+If you have forgotten your password, please use the "Forgot Password" link on the login page. If your account is locked, you must contact the IT Help Desk via email at it.support@ourcompany.com to have it unlocked.
+
+## VPN Access
+To access the company network from outside the office, you must use the official company VPN. You can download the "SecureConnect VPN" client from the IT section of the employee portal. Follow the setup guide to install it. If you face connection issues, ensure your internet is stable before contacting support.
+
+## Printer Issues
+If a printer is not working, first check if it is powered on and connected to the network. Check for any error messages on the printer's display. If the problem persists, note the printer's model and location and report the issue in the #it-support channel on Slack.
