@@ -10,14 +10,12 @@ from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
-from langchain_huggingface import HuggingFaceEmbeddings, HuggingFaceEndpoint, ChatHuggingFace, HuggingFacePipeline
+from langchain_huggingface import HuggingFaceInferenceAPIEmbeddings, HuggingFaceEndpoint, ChatHuggingFace, HuggingFacePipeline
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from dotenv import load_dotenv
-# We no longer need the local transformers pipeline
-# from transformers import pipeline
 
 # --- 1. SETUP ---
 load_dotenv()
@@ -46,16 +44,17 @@ async def profanity_filter_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
-# --- 2. LOAD MODELS & VECTOR STORE AT STARTUP ---
-print("Loading embeddings model and vector store...")
-embeddings = HuggingFaceEmbeddings(
-    model_name='sentence-transformers/all-MiniLM-L6-v2',
-    model_kwargs={'device': 'cpu'},
-    cache_folder='./.cache'
+# --- 2. LOAD MODELS & VECTOR STORE AT STARTUP (NOW ULTRA-LIGHTWEIGHT) ---
+print("Setting up API-based embeddings...")
+embeddings = HuggingFaceInferenceAPIEmbeddings(
+    repo_id="sentence-transformers/all-MiniLM-L6-v2",
+    api_key=os.getenv("HUGGINGFACEHUB_API_TOKEN"),
 )
+
+print("Loading vector store...")
 db = FAISS.load_local('vector_store/', embeddings, allow_dangerous_deserialization=True)
 retriever = db.as_retriever(search_kwargs={'k': 2})
-print("Embeddings and vector store loaded.")
+print("Vector store loaded.")
 
 print("Setting up remote Chat LLM...")
 llm_endpoint = HuggingFaceEndpoint(repo_id="mistralai/Mistral-7B-Instruct-v0.2", temperature=0.1, max_new_tokens=512)
@@ -63,19 +62,11 @@ llm_chat = ChatHuggingFace(llm=llm_endpoint)
 print("Chat LLM loaded.")
 
 print("Setting up summarization pipeline...")
-summarizer = HuggingFacePipeline.from_model_id(
-    model_id="facebook/bart-large-cnn",
-    task="summarization",
-    pipeline_kwargs={"max_length": 150, "min_length": 30, "no_repeat_ngram_size": 3},
-)
+summarizer = HuggingFaceEndpoint(repo_id="facebook/bart-large-cnn", task="summarization")
 print("Summarization pipeline ready.")
 
-# --- OPTIMIZED: Use HuggingFaceEndpoint for NER to save memory ---
 print("Setting up NER pipeline for keyword extraction...")
-keyword_extractor = HuggingFaceEndpoint(
-    repo_id="dslim/bert-base-NER",
-    task="token-classification",
-)
+keyword_extractor = HuggingFaceEndpoint(repo_id="dslim/bert-base-NER", task="token-classification")
 print("Keyword extraction pipeline ready.")
 
 
@@ -155,10 +146,12 @@ async def analyze_document(file: UploadFile = File(...)):
     try:
         contents = await file.read()
         text = contents.decode("utf-8")
-        summary_list = summarizer.invoke(text)
-        summary = summary_list[0]['summary_text'] if summary_list else "Could not generate summary."
         
-        entities = keyword_extractor.invoke(text)
+        # We need to manually parse the JSON output from these endpoints now
+        summary_result = summarizer.invoke({"inputs": text})
+        summary = summary_result[0].get('summary_text', "Could not generate summary.")
+        
+        entities = keyword_extractor.invoke({"inputs": text})
         keywords = sorted(list(set([entity['word'] for entity in entities if entity.get('entity_group') in ['ORG', "PER", 'LOC', 'MISC']])))
         
         return {"filename": file.filename, "summary": summary, "keywords": keywords}
