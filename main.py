@@ -10,7 +10,7 @@ from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
-from langchain_huggingface import HuggingFaceInferenceAPIEmbeddings, HuggingFaceEndpoint, ChatHuggingFace, HuggingFacePipeline
+from langchain_huggingface import HuggingFaceEndpointEmbeddings, HuggingFaceEndpoint, ChatHuggingFace
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
@@ -44,14 +44,14 @@ async def profanity_filter_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
-# --- 2. LOAD MODELS & VECTOR STORE AT STARTUP (NOW ULTRA-LIGHTWEIGHT) ---
+# --- 2. LOAD MODELS & VECTOR STORE AT STARTUP (ULTRA-LIGHTWEIGHT) ---
 print("Setting up API-based embeddings...")
-embeddings = HuggingFaceInferenceAPIEmbeddings(
+embeddings = HuggingFaceEndpointEmbeddings(
     repo_id="sentence-transformers/all-MiniLM-L6-v2",
-    api_key=os.getenv("HUGGINGFACEHUB_API_TOKEN"),
 )
 
 print("Loading vector store...")
+# allow_dangerous_deserialization is needed for FAISS with newer LangChain versions
 db = FAISS.load_local('vector_store/', embeddings, allow_dangerous_deserialization=True)
 retriever = db.as_retriever(search_kwargs={'k': 2})
 print("Vector store loaded.")
@@ -61,13 +61,10 @@ llm_endpoint = HuggingFaceEndpoint(repo_id="mistralai/Mistral-7B-Instruct-v0.2",
 llm_chat = ChatHuggingFace(llm=llm_endpoint)
 print("Chat LLM loaded.")
 
-print("Setting up summarization pipeline...")
+print("Setting up summarization and NER pipelines via API...")
 summarizer = HuggingFaceEndpoint(repo_id="facebook/bart-large-cnn", task="summarization")
-print("Summarization pipeline ready.")
-
-print("Setting up NER pipeline for keyword extraction...")
 keyword_extractor = HuggingFaceEndpoint(repo_id="dslim/bert-base-NER", task="token-classification")
-print("Keyword extraction pipeline ready.")
+print("Analysis pipelines ready.")
 
 
 # --- 3. CREATE THE RAG CHAIN ---
@@ -129,7 +126,6 @@ def verify_otp(data: OtpVerify):
         if stored_data and datetime.now() > stored_data["expiry"]:
              del otp_storage[data.email]
         return JSONResponse(status_code=400, content={"message": "Invalid or expired OTP."})
-
     del otp_storage[data.email]
     return {"message": "OTP verified successfully. Access granted."}
 
@@ -147,7 +143,6 @@ async def analyze_document(file: UploadFile = File(...)):
         contents = await file.read()
         text = contents.decode("utf-8")
         
-        # We need to manually parse the JSON output from these endpoints now
         summary_result = summarizer.invoke({"inputs": text})
         summary = summary_result[0].get('summary_text', "Could not generate summary.")
         
