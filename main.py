@@ -7,6 +7,7 @@ import ssl
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI, File, UploadFile, Request
+from fastapi.staticfiles import StaticFiles # New Import
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
@@ -29,6 +30,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def profanity_filter_middleware(request: Request, call_next):
+    # ... profanity filter middleware remains the same ...
     if request.url.path == "/chat":
         try:
             body_bytes = await request.body()
@@ -44,28 +46,23 @@ async def profanity_filter_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
-# --- 2. LOAD MODELS & VECTOR STORE AT STARTUP (ULTRA-LIGHTWEIGHT) ---
+# --- 2. LOAD MODELS & VECTOR STORE AT STARTUP ---
 print("Setting up API-based embeddings...")
 embeddings = HuggingFaceEndpointEmbeddings(
     repo_id="sentence-transformers/all-MiniLM-L6-v2",
 )
-
 print("Loading vector store...")
-# allow_dangerous_deserialization is needed for FAISS with newer LangChain versions
 db = FAISS.load_local('vector_store/', embeddings, allow_dangerous_deserialization=True)
 retriever = db.as_retriever(search_kwargs={'k': 2})
 print("Vector store loaded.")
-
 print("Setting up remote Chat LLM...")
 llm_endpoint = HuggingFaceEndpoint(repo_id="mistralai/Mistral-7B-Instruct-v0.2", temperature=0.1, max_new_tokens=512)
 llm_chat = ChatHuggingFace(llm=llm_endpoint)
 print("Chat LLM loaded.")
-
 print("Setting up summarization and NER pipelines via API...")
 summarizer = HuggingFaceEndpoint(repo_id="facebook/bart-large-cnn", task="summarization")
 keyword_extractor = HuggingFaceEndpoint(repo_id="dslim/bert-base-NER", task="token-classification")
 print("Analysis pipelines ready.")
-
 
 # --- 3. CREATE THE RAG CHAIN ---
 prompt_template = ChatPromptTemplate.from_messages([
@@ -81,6 +78,7 @@ class Query(BaseModel):
     text: str
 
 def send_otp_email(receiver_email: str, otp: str):
+    # ... send_otp_email function remains the same ...
     sender_email = os.getenv("SENDER_EMAIL")
     password = os.getenv("SENDER_PASSWORD")
     if not sender_email or not password:
@@ -100,17 +98,13 @@ def send_otp_email(receiver_email: str, otp: str):
 
 class OtpRequest(BaseModel):
     email: EmailStr
-
 class OtpVerify(BaseModel):
     email: EmailStr
     otp: str
 
-@app.get("/")
-def read_root():
-    return {"message": "Sahayak AI Assistant API is running!"}
-
 @app.post("/request-otp")
 def request_otp(data: OtpRequest):
+    # ... request-otp endpoint remains the same ...
     otp = ''.join(random.choices(string.digits, k=6))
     expiry = datetime.now() + timedelta(minutes=5)
     otp_storage[data.email] = {"otp": otp, "expiry": expiry}
@@ -118,9 +112,10 @@ def request_otp(data: OtpRequest):
         return {"message": "OTP sent successfully."}
     else:
         return JSONResponse(status_code=500, content={"message": "Failed to send OTP email."})
-
+    
 @app.post("/verify-otp")
 def verify_otp(data: OtpVerify):
+    # ... verify-otp endpoint remains the same ...
     stored_data = otp_storage.get(data.email)
     if not stored_data or datetime.now() > stored_data["expiry"] or stored_data["otp"] != data.otp:
         if stored_data and datetime.now() > stored_data["expiry"]:
@@ -131,24 +126,27 @@ def verify_otp(data: OtpVerify):
 
 @app.post("/chat")
 def chat(query: Query):
+    # ... chat endpoint remains the same ...
     print(f"Received query: {query.text}")
     response = rag_chain.invoke(query.text)
     print(f"Generated response: {response}")
     return {"answer": response}
-
+    
 @app.post("/analyze")
 async def analyze_document(file: UploadFile = File(...)):
+    # ... analyze endpoint remains the same ...
     print(f"Received file: {file.filename}")
     try:
         contents = await file.read()
         text = contents.decode("utf-8")
-        
         summary_result = summarizer.invoke({"inputs": text})
         summary = summary_result[0].get('summary_text', "Could not generate summary.")
-        
         entities = keyword_extractor.invoke({"inputs": text})
         keywords = sorted(list(set([entity['word'] for entity in entities if entity.get('entity_group') in ['ORG', "PER", 'LOC', 'MISC']])))
-        
         return {"filename": file.filename, "summary": summary, "keywords": keywords}
     except Exception as e:
         return {"error": f"Failed to process file: {str(e)}"}
+
+# --- 5. MOUNT THE STATIC FRONTEND ---
+# This line must be AFTER all your API endpoints
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
